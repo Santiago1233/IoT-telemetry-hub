@@ -1,0 +1,203 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>SensorHub — Live Telemetry</title>
+<style>
+  :root {
+    --bg: #e8ecef;        /* instrument gray  */
+    --panel: #ffffff;
+    --line: #c9d2d8;
+    --ink: #16232e;
+    --muted: #5c6b76;
+    --accent: #0e7c86;    /* instrument teal  */
+    --alert: #b3261e;
+    --mono: ui-monospace, "SF Mono", "Cascadia Mono", Consolas, monospace;
+  }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0; background: var(--bg); color: var(--ink);
+    font: 15px/1.5 system-ui, -apple-system, "Segoe UI", sans-serif;
+  }
+  header {
+    background: var(--ink); color: #fff;
+    padding: 14px 24px; display: flex; align-items: baseline; gap: 14px;
+  }
+  header h1 { font-size: 17px; margin: 0; letter-spacing: .04em; }
+  header .tag { color: #9fb3c0; font-family: var(--mono); font-size: 12px; }
+  main { max-width: 1080px; margin: 24px auto; padding: 0 16px; }
+
+  .controls { display: flex; gap: 10px; flex-wrap: wrap; margin-bottom: 18px; }
+  select {
+    font: inherit; padding: 7px 10px; border: 1px solid var(--line);
+    border-radius: 4px; background: var(--panel); color: var(--ink);
+  }
+  select:focus { outline: 2px solid var(--accent); outline-offset: 1px; }
+
+  .grid { display: grid; grid-template-columns: repeat(4, 1fr); gap: 12px; }
+  @media (max-width: 720px) { .grid { grid-template-columns: repeat(2, 1fr); } }
+  .tile {
+    background: var(--panel); border: 1px solid var(--line); border-radius: 6px;
+    padding: 12px 14px;
+  }
+  .tile .label {
+    font-size: 11px; text-transform: uppercase; letter-spacing: .08em;
+    color: var(--muted);
+  }
+  .tile .value {
+    font-family: var(--mono); font-size: 26px; margin-top: 4px;
+    font-variant-numeric: tabular-nums;
+  }
+
+  .panel {
+    background: var(--panel); border: 1px solid var(--line); border-radius: 6px;
+    margin-top: 14px; padding: 14px;
+  }
+  .panel h2 {
+    font-size: 12px; text-transform: uppercase; letter-spacing: .08em;
+    color: var(--muted); margin: 0 0 10px;
+  }
+  canvas { width: 100%; height: 260px; display: block; }
+
+  table { width: 100%; border-collapse: collapse; font-size: 14px; }
+  th, td { text-align: left; padding: 6px 8px; border-top: 1px solid var(--line); }
+  th { color: var(--muted); font-weight: 600; border-top: 0; }
+  td.num { font-family: var(--mono); font-variant-numeric: tabular-nums; }
+  .alert-op { color: var(--alert); font-family: var(--mono); }
+  .empty { color: var(--muted); padding: 12px 0; }
+</style>
+</head>
+<body>
+<header>
+  <h1>SENSORHUB</h1>
+  <span class="tag" id="status">connecting…</span>
+</header>
+<main>
+  <div class="controls">
+    <select id="device" aria-label="Device"></select>
+    <select id="metric" aria-label="Metric"></select>
+  </div>
+
+  <div class="grid">
+    <div class="tile"><div class="label">Latest</div><div class="value" id="v-latest">—</div></div>
+    <div class="tile"><div class="label">Average</div><div class="value" id="v-avg">—</div></div>
+    <div class="tile"><div class="label">Min</div><div class="value" id="v-min">—</div></div>
+    <div class="tile"><div class="label">Max</div><div class="value" id="v-max">—</div></div>
+  </div>
+
+  <div class="panel">
+    <h2>Signal — last 60 readings</h2>
+    <canvas id="chart" height="260"></canvas>
+  </div>
+
+  <div class="panel">
+    <h2>Alerts</h2>
+    <div id="alerts"><div class="empty">No alerts yet.</div></div>
+  </div>
+</main>
+
+<script>
+(() => {
+  const $ = (id) => document.getElementById(id);
+  const fmt = (n) => (n === null || n === undefined) ? "—" : Number(n).toFixed(2);
+  let devices = [], metrics = [];
+
+  async function api(path) {
+    const res = await fetch(path);
+    if (!res.ok) throw new Error(await res.text());
+    return res.json();
+  }
+
+  /* ---- minimal dependency-free line chart ---- */
+  function drawChart(values) {
+    const c = $("chart"), ctx = c.getContext("2d");
+    const w = c.width = c.clientWidth * devicePixelRatio;
+    const h = c.height = 260 * devicePixelRatio;
+    ctx.clearRect(0, 0, w, h);
+    if (values.length < 2) return;
+
+    const pad = 34 * devicePixelRatio;
+    const min = Math.min(...values), max = Math.max(...values);
+    const span = (max - min) || 1;
+    const x = (i) => pad + (i / (values.length - 1)) * (w - pad * 1.4);
+    const y = (v) => (h - pad) - ((v - min) / span) * (h - pad * 2);
+
+    ctx.strokeStyle = "#c9d2d8"; ctx.lineWidth = devicePixelRatio;
+    ctx.font = `${11 * devicePixelRatio}px ui-monospace, monospace`;
+    ctx.fillStyle = "#5c6b76";
+    [min, (min + max) / 2, max].forEach((v) => {
+      ctx.beginPath(); ctx.moveTo(pad, y(v)); ctx.lineTo(w - pad * 0.4, y(v)); ctx.stroke();
+      ctx.fillText(fmt(v), 2, y(v) + 4 * devicePixelRatio);
+    });
+
+    ctx.strokeStyle = "#0e7c86"; ctx.lineWidth = 2 * devicePixelRatio;
+    ctx.beginPath();
+    values.forEach((v, i) => i ? ctx.lineTo(x(i), y(v)) : ctx.moveTo(x(i), y(v)));
+    ctx.stroke();
+  }
+
+  /* ---- selectors ---- */
+  async function loadDevices() {
+    devices = await api("/api/devices");
+    const sel = $("device");
+    sel.innerHTML = devices.length
+      ? devices.map((d) => `<option value="${d.id}">${d.name}</option>`).join("")
+      : `<option value="">no devices yet</option>`;
+  }
+
+  async function loadMetrics() {
+    const id = $("device").value;
+    if (!id) return;
+    const rows = await api(`/api/readings?device_id=${id}&limit=200`);
+    metrics = [...new Set(rows.map((r) => r.metric))];
+    const sel = $("metric"), prev = sel.value;
+    sel.innerHTML = metrics.length
+      ? metrics.map((m) => `<option${m === prev ? " selected" : ""}>${m}</option>`).join("")
+      : `<option value="">no readings yet</option>`;
+  }
+
+  /* ---- refresh loop ---- */
+  async function refresh() {
+    try {
+      const id = $("device").value, metric = $("metric").value;
+      if (id && metric) {
+        const [stats, rows, alerts] = await Promise.all([
+          api(`/api/stats?device_id=${id}&metric=${metric}`),
+          api(`/api/readings?device_id=${id}&metric=${metric}&limit=60`),
+          api("/api/alerts?limit=8"),
+        ]);
+        $("v-latest").textContent = fmt(stats.latest.value);
+        $("v-avg").textContent = fmt(stats.avg);
+        $("v-min").textContent = fmt(stats.min);
+        $("v-max").textContent = fmt(stats.max);
+        drawChart(rows.map((r) => r.value).reverse());
+        $("alerts").innerHTML = alerts.length
+          ? `<table><tr><th>Time (UTC)</th><th>Device</th><th>Metric</th><th>Value</th><th>Rule</th></tr>` +
+            alerts.map((a) =>
+              `<tr><td class="num">${a.created_at.replace("T", " ").replace("Z", "")}</td>` +
+              `<td>${(devices.find((d) => d.id === a.device_id) || {}).name || a.device_id}</td>` +
+              `<td>${a.metric}</td><td class="num">${fmt(a.value)}</td>` +
+              `<td class="alert-op">${a.op === "gt" ? ">" : "<"} ${fmt(a.threshold)}</td></tr>`
+            ).join("") + `</table>`
+          : `<div class="empty">No alerts yet.</div>`;
+      }
+      $("status").textContent = "live · polling 2s";
+    } catch {
+      $("status").textContent = "connection lost — retrying";
+    }
+  }
+
+  async function boot() {
+    await loadDevices();
+    await loadMetrics();
+    $("device").addEventListener("change", async () => { await loadMetrics(); refresh(); });
+    $("metric").addEventListener("change", refresh);
+    refresh();
+    setInterval(async () => { await loadMetrics(); refresh(); }, 2000);
+  }
+  boot();
+})();
+</script>
+</body>
+</html>
